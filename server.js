@@ -1,6 +1,6 @@
 const express = require('express');
-const crypto = require('crypto');
-const axios = require('axios');
+const crypto  = require('crypto');
+const axios   = require('axios');
 
 const app = express();
 
@@ -13,27 +13,195 @@ const CONFIG = {
   zoho: {
     clientId:     '1000.0K493ZO5GJSK6JB9GABD3G665BNO5F',
     clientSecret: '901ca9acfadc226dd7baf2148794709dc47ff3368a',
-    refreshToken: '1000.262d4b7eb13a915d38efbbbcff7174833.ecfdd79cd31d90ac59d8470f09ed537',
+    refreshToken: '1000.7eabf61c9e73cdbac45487d0120ae38a.3fe9ec87abc59dd04b916d7c3ecc300d',
     orgId:        '60046870802',
     apiDomain:    'https://www.zohoapis.in'
   }
 };
 
-// ─── CONSTANTS ────────────────────────────────────────────────────────────────
-// HSN codes that are always 5% regardless of price
-const HSN_ALWAYS_5 = ['9503', '9619'];
-
-// HSN codes that are always 18% regardless of price
-const HSN_ALWAYS_18 = ['9404'];
-
-// HSN codes where rate depends on price (≤2500 = 5%, >2500 = 18%)
-const HSN_PRICE_BASED = ['6208', '6301', '6304'];
-
-// Price threshold for GST slab split
-const GST_PRICE_THRESHOLD = 2500;
-
-// Maharashtra identifiers (intra-state = CGST + SGST)
-const MAHARASHTRA = ['maharashtra', 'mh'];
+// ─── SKU → GST RATE MAP ───────────────────────────────────────────────────────
+const SKU_TAX_MAP = {
+  "ASK/  Horse Cradle/CS/260021": 18, "ASK/ Assorted/MS/260119": 18,
+  "ASK/ Bunny Newborn Starter Kit Gift Box/260127": 18,
+  "ASK/ Diaper Changing pad (set of Two)CP/260088": 18,
+  "ASK/ Horse Cradle/ Tote/260104": 18, "ASK/ Horse Cradle//PMAT/260039": 18,
+  "ASK/ Horse Cradle/BIBS3/260031": 5, "ASK/ Horse Cradle/BL/260040": 18,
+  "ASK/ Horse Cradle/BUMPER/260026": 18, "ASK/ Horse Cradle/BURP/260030": 5,
+  "ASK/ Horse Cradle/CP/260028": 5, "ASK/ Horse Cradle/Cady/260098": 18,
+  "ASK/ Horse Cradle/Cady/260099": 18, "ASK/ Horse Cradle/Cm/260022": 18,
+  "ASK/ Horse Cradle/FC/260041": 5, "ASK/ Horse Cradle/FS/260023": 18,
+  "ASK/ Horse Cradle/FT/260037": 5, "ASK/ Horse Cradle/MBL/260024": 18,
+  "ASK/ Horse Cradle/MBL/260025": 18, "ASK/ Horse Cradle/MS/260029": 18,
+  "ASK/ Horse Cradle/MSP/260027": 18, "ASK/ Horse Cradle/NAP/260032": 5,
+  "ASK/ Horse Cradle/NAP/260033": 5, "ASK/ Horse Cradle/Pouch/260093": 18,
+  "ASK/ Horse Cradle/SBAG/260038": 18, "ASK/ Horse Cradle/TOWEL/260034": 18,
+  "ASK/ Horse Cradle/TOWEL/260035": 18, "ASK/ Horse Cradle/WC/260036": 5,
+  "ASK/ Portable Diaper Changing pad /DCP/260087": 18,
+  "ASK/ Sheep Newborn Starter Kit Gift Box /260128": 18,
+  "ASK/ Unicorn/BL/260116": 18, "ASK/ Yellow Giraffe/BL/260115": 18,
+  "ASK/Adventure Feeding Gift Box /260129": 18, "ASK/Adventure//PMAT/260077": 18,
+  "ASK/Adventure/BIBS3/260070": 5, "ASK/Adventure/BL/260078": 18,
+  "ASK/Adventure/BUMPER/260065": 18, "ASK/Adventure/BURP/260069": 5,
+  "ASK/Adventure/CP/260067": 5, "ASK/Adventure/CS/260061": 18,
+  "ASK/Adventure/Cady/260101": 18, "ASK/Adventure/Cady/260102": 18,
+  "ASK/Adventure/Cm/260062": 18, "ASK/Adventure/DCS/260083": 18,
+  "ASK/Adventure/FC/260079": 5, "ASK/Adventure/FS/260063": 18,
+  "ASK/Adventure/FT/260075": 5, "ASK/Adventure/MBL/260064": 18,
+  "ASK/Adventure/MS/260068": 18, "ASK/Adventure/MSP/260066": 18,
+  "ASK/Adventure/NAP/260071": 5, "ASK/Adventure/NAP/260072": 5,
+  "ASK/Adventure/Pouch/260095": 18, "ASK/Adventure/SBAG/260076": 18,
+  "ASK/Adventure/TOWEL/260073": 18, "ASK/Adventure/WC/260074": 5,
+  "ASK/Alphabe /BL/260117": 18, "ASK/Animal Safari GIft Box /260132": 18,
+  "ASK/Assorted/MS/260118": 18,
+  "ASK/BIBS3/250010": 5, "ASK/BIBS3/250028": 5, "ASK/BIBS3/250046": 5,
+  "ASK/BIBS3/250064": 5, "ASK/BIBS3/250118": 5, "ASK/BIBS3/250136": 5,
+  "ASK/BIBS3/250154": 5, "ASK/BIBS3/250172": 5, "ASK/BIBS3/250190": 5,
+  "ASK/BIBS3/250210": 5, "ASK/BIBS3/250229": 5, "ASK/BIBS3/250248": 5,
+  "ASK/BL/250017": 18, "ASK/BL/250035": 18, "ASK/BL/250053": 18,
+  "ASK/BL/250071": 18, "ASK/BL/250073": 18, "ASK/BL/250074": 18,
+  "ASK/BL/250075": 18, "ASK/BL/250076": 18, "ASK/BL/250077": 18,
+  "ASK/BL/250079": 18, "ASK/BL/250080": 18, "ASK/BL/250081": 18,
+  "ASK/BL/250125": 18, "ASK/BL/250179": 18,
+  "ASK/BR/250103": 18, "ASK/BR/250104": 18, "ASK/BR/250105": 18,
+  "ASK/BR/250106": 18, "ASK/BR/250107": 18, "ASK/BR/250108": 18,
+  "ASK/BSK/250082": 5, "ASK/BSK/250083": 5, "ASK/BSK/250085": 5,
+  "ASK/BSK/250086": 5, "ASK/BSK/2500884": 5, "ASK/BSK/250090": 5,
+  "ASK/BUMPER/250005": 18, "ASK/BUMPER/250023": 18, "ASK/BUMPER/250041": 18,
+  "ASK/BUMPER/250059": 18, "ASK/BUMPER/250113": 18, "ASK/BUMPER/250131": 18,
+  "ASK/BUMPER/250149": 18, "ASK/BUMPER/250167": 18, "ASK/BUMPER/250185": 18,
+  "ASK/BUMPER/250205": 18, "ASK/BUMPER/250224": 18, "ASK/BUMPER/250243": 18,
+  "ASK/BUMPER/260120": 18,
+  "ASK/BURP/250009": 5, "ASK/BURP/250027": 5, "ASK/BURP/250045": 5,
+  "ASK/BURP/250063": 5, "ASK/BURP/250117": 5, "ASK/BURP/250135": 5,
+  "ASK/BURP/250153": 5, "ASK/BURP/250171": 5, "ASK/BURP/250189": 5,
+  "ASK/BURP/250209": 5, "ASK/BURP/250228": 5, "ASK/BURP/250247": 5,
+  "ASK/Baby Nest Bed/NB/260107": 18, "ASK/Baby Nest Bed/NB/260108": 18,
+  "ASK/Baby Nest Bed/NB/260109": 18, "ASK/Baby Nest Bed/NB/260110": 18,
+  "ASK/Bird Customised Gift Box/260145": 18, "ASK/Bird/ Tote/260103": 18,
+  "ASK/Bird/BIBS3/260011": 5, "ASK/Bird/BL/260019": 18,
+  "ASK/Bird/BUMPER/260006": 18, "ASK/Bird/BURP/260010": 5,
+  "ASK/Bird/CP/260008": 5, "ASK/Bird/CS/260001": 18,
+  "ASK/Bird/Cady/260096": 18, "ASK/Bird/Cady/260097": 18,
+  "ASK/Bird/Cm/260002": 18, "ASK/Bird/DCS/260080": 18,
+  "ASK/Bird/FC/260020": 5, "ASK/Bird/FS/260003": 18,
+  "ASK/Bird/FT/260016": 5, "ASK/Bird/MBL/260004": 18,
+  "ASK/Bird/MBL/260005": 18, "ASK/Bird/MS/260009": 18,
+  "ASK/Bird/MSP/260007": 18, "ASK/Bird/NAP/260012": 5,
+  "ASK/Bird/NAP/260013": 5, "ASK/Bird/PMAT/260018": 18,
+  "ASK/Bird/Pouch/260092": 18, "ASK/Bird/SBAG/260017": 18,
+  "ASK/Bird/TOWEL/260014": 18, "ASK/Bird/WC/260015": 5,
+  "ASK/Blossom Customised Gift Box /260141": 18,
+  "ASK/CP/250007": 5, "ASK/CP/250025": 5, "ASK/CP/250043": 5,
+  "ASK/CP/250061": 5, "ASK/CP/250096": 18, "ASK/CP/250097": 18,
+  "ASK/CP/250098": 18, "ASK/CP/250099": 18, "ASK/CP/250115": 5,
+  "ASK/CP/250133": 5, "ASK/CP/250151": 5, "ASK/CP/250169": 5,
+  "ASK/CP/250187": 5, "ASK/CP/250207": 5, "ASK/CP/250226": 5,
+  "ASK/CP/250245": 5,
+  "ASK/CRIB/250181": 18, "ASK/CRIB/250201": 18,
+  "ASK/CRIB/250221": 18, "ASK/CRIB/250239": 18,
+  "ASK/CS/250001": 18, "ASK/CS/250019": 18, "ASK/CS/250037": 18,
+  "ASK/CS/250055": 18, "ASK/CS/250109": 18, "ASK/CS/250127": 18,
+  "ASK/CS/250145": 18, "ASK/CS/250163": 18,
+  "ASK/Cm/250002": 18, "ASK/Cm/250020": 18, "ASK/Cm/250038": 18,
+  "ASK/Cm/250056": 18, "ASK/Cm/250110": 18, "ASK/Cm/250128": 18,
+  "ASK/Cm/250146": 18, "ASK/Cm/250164": 18, "ASK/Cm/250182": 18,
+  "ASK/Cm/250202": 18, "ASK/Cm/250222": 18, "ASK/Cm/250240": 18,
+  "ASK/Cuddle Cloths/260121": 5, "ASK/Cuddle Cloths/260122": 5,
+  "ASK/Cuddle Cloths/260123": 5, "ASK/Cuddle Cloths/260124": 5,
+  "ASK/DCP/250092": 18, "ASK/DCP/250093": 18,
+  "ASK/DCP/250094": 18, "ASK/DCP/250095": 18,
+  "ASK/Diaper Changing pad (set of Two)CP/260089": 18,
+  "ASK/Diaper Changing pad (set of Two)CP/260090": 18,
+  "ASK/Diaper Changing pad (set of Two)CP/260091": 18,
+  "ASK/Elephant Feeding Gift Box/260131": 18,
+  "ASK/FC/250018": 5, "ASK/FC/250036": 5, "ASK/FC/250054": 5,
+  "ASK/FC/250072": 5, "ASK/FC/250126": 5, "ASK/FC/250143": 5,
+  "ASK/FC/250144": 5, "ASK/FC/250161": 5, "ASK/FC/250162": 5,
+  "ASK/FC/250180": 5, "ASK/FC/250198": 5, "ASK/FC/250199": 5,
+  "ASK/FC/250200": 5, "ASK/FC/250218": 5, "ASK/FC/250219": 5,
+  "ASK/FC/250220": 5, "ASK/FC/250236": 5, "ASK/FC/250237": 5,
+  "ASK/FC/250238": 5, "ASK/FC/250255": 5, "ASK/FC/250256": 5,
+  "ASK/FC/250257": 5,
+  "ASK/FHT/250258": 18, "ASK/FHT/250259": 18,
+  "ASK/FHT/250260": 18, "ASK/FHT/250261": 18,
+  "ASK/FS/250003": 18, "ASK/FS/250021": 18, "ASK/FS/250039": 18,
+  "ASK/FS/250057": 18, "ASK/FS/250111": 18, "ASK/FS/250129": 18,
+  "ASK/FS/250147": 18, "ASK/FS/250165": 18, "ASK/FS/250183": 18,
+  "ASK/FS/250203": 18, "ASK/FS/250223": 18, "ASK/FS/250241": 18,
+  "ASK/FT/250014": 5, "ASK/FT/250032": 5, "ASK/FT/250050": 5,
+  "ASK/FT/250068": 5, "ASK/FT/250122": 5, "ASK/FT/250140": 5,
+  "ASK/FT/250158": 5, "ASK/FT/250176": 5, "ASK/FT/250195": 5,
+  "ASK/FT/250215": 5, "ASK/FT/250233": 5, "ASK/FT/250252": 5,
+  "ASK/Horse Cradle Customised Gift Box /260144": 18,
+  "ASK/Horse Cradle Mini Crib Set Gift Box/260138": 18,
+  "ASK/Horse Cradle/DCS/260081": 18,
+  "ASK/M/250134": 18,
+  "ASK/MBL/250004": 18, "ASK/MBL/250022": 18, "ASK/MBL/250040": 18,
+  "ASK/MBL/250058": 18, "ASK/MBL/250112": 18, "ASK/MBL/250130": 18,
+  "ASK/MBL/250148": 18, "ASK/MBL/250166": 18, "ASK/MBL/250184": 18,
+  "ASK/MBL/250204": 18, "ASK/MBL/250224": 18, "ASK/MBL/250242": 18,
+  "ASK/MS/250008": 18, "ASK/MS/250026": 18, "ASK/MS/250044": 18,
+  "ASK/MS/250062": 18, "ASK/MS/250116": 18, "ASK/MS/250152": 18,
+  "ASK/MS/250170": 18, "ASK/MS/250188": 18, "ASK/MS/250208": 18,
+  "ASK/MS/250227": 18, "ASK/MS/250246": 18,
+  "ASK/MSP/250006": 18, "ASK/MSP/250024": 18, "ASK/MSP/250042": 18,
+  "ASK/MSP/250060": 18, "ASK/MSP/250114": 18, "ASK/MSP/250132": 18,
+  "ASK/MSP/250150": 18, "ASK/MSP/250168": 18, "ASK/MSP/250186": 18,
+  "ASK/MSP/250206": 18, "ASK/MSP/250225": 18, "ASK/MSP/250244": 18,
+  "ASK/Masai Bath Time Gift Box /260135": 18,
+  "ASK/Masai Mini Crib Set Gift Box /260137": 18,
+  "ASK/Masai Newborn Starter Kit Gift Box/260125": 18,
+  "ASK/NAP/250011": 5, "ASK/NAP/250011-A": 5, "ASK/NAP/250029": 5,
+  "ASK/NAP/250029-A": 5, "ASK/NAP/250047": 5, "ASK/NAP/250047-A": 5,
+  "ASK/NAP/250065": 5, "ASK/NAP/250065-A": 5, "ASK/NAP/250119": 5,
+  "ASK/NAP/250119-A": 5, "ASK/NAP/250137": 5, "ASK/NAP/250137-A": 5,
+  "ASK/NAP/250155": 5, "ASK/NAP/250155-A": 5, "ASK/NAP/250173": 5,
+  "ASK/NAP/250173-A": 5, "ASK/NAP/250192": 5, "ASK/NAP/250192-A": 5,
+  "ASK/NAP/250212": 5, "ASK/NAP/250212-A": 5, "ASK/NAP/250230": 5,
+  "ASK/NAP/250230-A": 5, "ASK/NAP/250249": 5, "ASK/NAP/250249-A": 5,
+  "ASK/NB/250100": 18, "ASK/NB/250101": 18, "ASK/NB/250102": 18,
+  "ASK/PMAT/250016": 18, "ASK/PMAT/250034": 18, "ASK/PMAT/250052": 18,
+  "ASK/PMAT/250070": 18, "ASK/PMAT/250124": 18, "ASK/PMAT/250142": 18,
+  "ASK/PMAT/250160": 18, "ASK/PMAT/250178": 18, "ASK/PMAT/250197": 18,
+  "ASK/PMAT/250217": 18, "ASK/PMAT/250235": 18, "ASK/PMAT/250254": 18,
+  "ASK/Parachute Bedding Essentials Gift Box /260139": 18,
+  "ASK/Portable Diaper Changing pad /DCP/260084": 18,
+  "ASK/Portable Diaper Changing pad /DCP/260085": 18,
+  "ASK/Portable Diaper Changing pad /DCP/260086": 18,
+  "ASK/SBAG/250015": 18, "ASK/SBAG/250033": 18, "ASK/SBAG/250051": 18,
+  "ASK/SBAG/250069": 18, "ASK/SBAG/250123": 18, "ASK/SBAG/250141": 18,
+  "ASK/SBAG/250159": 18, "ASK/SBAG/250177": 18, "ASK/SBAG/250196": 18,
+  "ASK/SBAG/250216": 18, "ASK/SBAG/250234": 18, "ASK/SBAG/250253": 18,
+  "ASK/Sailboat Bedding Essentials Gift Box/260140": 18,
+  "ASK/Sheep Bath Time Gift Box /260134": 18,
+  "ASK/Sheep/ Tote/260105": 18, "ASK/Sheep/ Tote/260106": 18,
+  "ASK/Sheep//PMAT/260058": 18, "ASK/Sheep/BIBS3/26051": 5,
+  "ASK/Sheep/BL/260059": 18, "ASK/Sheep/BUMPER/260046": 18,
+  "ASK/Sheep/BURP/260050": 5, "ASK/Sheep/CP/260048": 5,
+  "ASK/Sheep/CS/260042": 18, "ASK/Sheep/Cady/260100": 18,
+  "ASK/Sheep/Cm/260043": 18, "ASK/Sheep/DCS/260082": 18,
+  "ASK/Sheep/FC/260060": 5, "ASK/Sheep/FS/260044": 18,
+  "ASK/Sheep/FT/260056": 5, "ASK/Sheep/MBL/260045": 18,
+  "ASK/Sheep/MS/260049": 18, "ASK/Sheep/MSP/260047": 18,
+  "ASK/Sheep/NAP/260052": 5, "ASK/Sheep/NAP/260053": 5,
+  "ASK/Sheep/Pouch/260094": 18, "ASK/Sheep/SBAG/260057": 18,
+  "ASK/Sheep/TOWEL/260054": 18, "ASK/Sheep/WC/260055": 5,
+  "ASK/Sicily Customised Gift Box /260142": 18,
+  "ASK/Sicily Feeding Gift Box/260130": 18,
+  "ASK/TOWEL/250012": 18, "ASK/TOWEL/250030": 18, "ASK/TOWEL/250048": 18,
+  "ASK/TOWEL/250066": 18, "ASK/TOWEL/250120": 18, "ASK/TOWEL/250138": 18,
+  "ASK/TOWEL/250156": 18, "ASK/TOWEL/250174": 18, "ASK/TOWEL/250193": 18,
+  "ASK/TOWEL/250213": 18, "ASK/TOWEL/250231": 18, "ASK/TOWEL/250250": 18,
+  "ASK/TY/250087": 5, "ASK/TY/250088": 5, "ASK/TY/250089": 5, "ASK/TY/250091": 5,
+  "ASK/Teddy Mini Crib Set Gift Box /260136": 18,
+  "ASK/Teddy Newborn Starter Kit Gift Box/260126": 18,
+  "ASK/The Sheep GIft Box /260133": 18,
+  "ASK/Train Customised Gift Box/260143": 18,
+  "ASK/WC/250013": 5, "ASK/WC/250031": 5, "ASK/WC/250049": 5,
+  "ASK/WC/250067": 5, "ASK/WC/250121": 5, "ASK/WC/250139": 5,
+  "ASK/WC/250157": 5, "ASK/WC/250175": 5, "ASK/WC/250194": 5,
+  "ASK/WC/250214": 5, "ASK/WC/250232": 5, "ASK/WC/250251": 5
+};
 
 // ─── ZOHO TOKEN MANAGEMENT ───────────────────────────────────────────────────
 let zohoAccessToken = null;
@@ -41,7 +209,6 @@ let tokenExpiry = 0;
 
 async function getZohoToken() {
   if (zohoAccessToken && Date.now() < tokenExpiry) return zohoAccessToken;
-
   const { data } = await axios.post('https://accounts.zoho.in/oauth/v2/token', null, {
     params: {
       refresh_token: CONFIG.zoho.refreshToken,
@@ -50,7 +217,7 @@ async function getZohoToken() {
       grant_type:    'refresh_token'
     }
   });
-
+  if (!data.access_token) throw new Error('Failed to get Zoho token: ' + JSON.stringify(data));
   zohoAccessToken = data.access_token;
   tokenExpiry = Date.now() + (data.expires_in * 1000) - 60000;
   console.log('Zoho token refreshed successfully');
@@ -58,38 +225,23 @@ async function getZohoToken() {
 }
 
 function zohoHeaders(token) {
-  return {
-    Authorization: `Zoho-oauthtoken ${token}`,
-    'Content-Type': 'application/json'
-  };
+  return { Authorization: `Zoho-oauthtoken ${token}`, 'Content-Type': 'application/json' };
 }
 
-// ─── GST RATE LOGIC ──────────────────────────────────────────────────────────
-function determineGSTRate(hsn, unitPrice) {
-  const hsn4 = String(hsn || '').substring(0, 4);
-
-  if (HSN_ALWAYS_5.includes(hsn4))   return 5;
-  if (HSN_ALWAYS_18.includes(hsn4))  return 18;
-  if (HSN_PRICE_BASED.includes(hsn4)) {
-    return unitPrice <= GST_PRICE_THRESHOLD ? 5 : 18;
-  }
-
-  // Default fallback — log so you can catch unexpected HSN codes
-  console.warn(`Unknown HSN ${hsn4}, defaulting to 18%`);
+// ─── TAX LOGIC ───────────────────────────────────────────────────────────────
+function getGSTRate(sku) {
+  const rate = SKU_TAX_MAP[sku];
+  if (rate !== undefined) return rate;
+  console.warn(`SKU "${sku}" not in tax map, defaulting to 18%`);
   return 18;
 }
 
 function isIntraState(order) {
-  const state = (
-    order.shipping_address?.province ||
-    order.billing_address?.province  ||
-    ''
-  ).toLowerCase();
-  return MAHARASHTRA.some(m => state.includes(m));
+  const state = (order.shipping_address?.province || order.billing_address?.province || '').toLowerCase();
+  return state.includes('maharashtra') || state === 'mh';
 }
 
-// ─── ZOHO HELPERS ────────────────────────────────────────────────────────────
-// Cache tax group IDs so we only fetch once per server run
+// ─── TAX GROUP CACHE ─────────────────────────────────────────────────────────
 let taxGroupCache = null;
 
 async function getTaxGroupId(token, gstRate, intraState) {
@@ -99,188 +251,122 @@ async function getTaxGroupId(token, gstRate, intraState) {
       params:  { organization_id: CONFIG.zoho.orgId }
     });
     taxGroupCache = {};
-    (data.tax_groups || []).forEach(tg => {
-      taxGroupCache[tg.tax_group_name] = tg.tax_group_id;
-    });
+    (data.tax_groups || []).forEach(tg => { taxGroupCache[tg.tax_group_name] = tg.tax_group_id; });
     console.log('Tax groups loaded:', Object.keys(taxGroupCache));
   }
-
   const name = intraState ? `GST${gstRate}` : `IGST${gstRate}`;
   const id   = taxGroupCache[name];
-  if (!id) console.warn(`Tax group "${name}" not found in Zoho Books`);
+  if (!id) console.warn(`Tax group "${name}" not found`);
   return id || null;
 }
 
-async function findZohoItemBySKU(token, sku) {
-  if (!sku) return null;
-  try {
-    const { data } = await axios.get(`${CONFIG.zoho.apiDomain}/books/v3/items`, {
-      headers: zohoHeaders(token),
-      params:  { organization_id: CONFIG.zoho.orgId, search_text: sku }
-    });
-    const items = data.items || [];
-    return items.find(i => i.sku === sku) || items[0] || null;
-  } catch {
-    return null;
-  }
-}
-
+// ─── CONTACT HELPER ──────────────────────────────────────────────────────────
 async function findOrCreateContact(token, order) {
-  const email = order.email || order.billing_address?.email || '';
+  const email = order.email || '';
   const addr  = order.billing_address || order.shipping_address || {};
-  const name  = `${addr.first_name || ''} ${addr.last_name || ''}`.trim()
-              || order.customer?.first_name + ' ' + order.customer?.last_name
-              || 'Guest Customer';
+  const name  = `${addr.first_name || ''} ${addr.last_name || ''}`.trim() || 'Guest Customer';
 
-  // Try to find existing contact by email
   if (email) {
-    const { data } = await axios.get(`${CONFIG.zoho.apiDomain}/books/v3/contacts`, {
-      headers: zohoHeaders(token),
-      params:  { organization_id: CONFIG.zoho.orgId, email }
-    });
-    if (data.contacts?.length > 0) {
-      console.log(`Found existing contact: ${data.contacts[0].contact_name}`);
-      return data.contacts[0];
-    }
-  }
-
-  // Determine GST treatment
-  const hasGSTIN  = !!(order.note_attributes?.find(n => n.name === 'gstin')?.value);
-  const gstTreatment = hasGSTIN ? 'business_gst' : 'consumer';
-
-  // Create new contact
-  const payload = {
-    contact_name:    name,
-    contact_type:    'customer',
-    email,
-    phone:           addr.phone || order.phone || '',
-    gst_treatment:   gstTreatment,
-    billing_address: {
-      address: addr.address1 || '',
-      city:    addr.city     || '',
-      state:   addr.province || '',
-      zip:     addr.zip      || '',
-      country: addr.country  || 'India'
-    }
-  };
-
-  if (hasGSTIN) {
-    payload.gst_no = order.note_attributes.find(n => n.name === 'gstin').value;
+    try {
+      const { data } = await axios.get(`${CONFIG.zoho.apiDomain}/books/v3/contacts`, {
+        headers: zohoHeaders(token),
+        params:  { organization_id: CONFIG.zoho.orgId, email }
+      });
+      if (data.contacts?.length > 0) return data.contacts[0];
+    } catch (e) { /* continue */ }
   }
 
   const { data: created } = await axios.post(
     `${CONFIG.zoho.apiDomain}/books/v3/contacts`,
-    payload,
+    {
+      contact_name: name, contact_type: 'customer', email,
+      phone: addr.phone || order.phone || '',
+      gst_treatment: 'consumer',
+      billing_address: {
+        address: addr.address1 || '', city: addr.city || '',
+        state: addr.province || '', zip: addr.zip || '',
+        country: addr.country || 'India'
+      }
+    },
     { headers: zohoHeaders(token), params: { organization_id: CONFIG.zoho.orgId } }
   );
-
-  console.log(`Created new contact: ${name}`);
+  console.log(`Created contact: ${name}`);
   return created.contact;
 }
 
-// ─── CORE: CREATE INVOICE ────────────────────────────────────────────────────
-async function createInvoiceForOrder(order) {
-  const token     = await getZohoToken();
+// ─── CREATE SALES ORDER ───────────────────────────────────────────────────────
+async function createSalesOrderForOrder(order) {
+  const token      = await getZohoToken();
   const intraState = isIntraState(order);
-  const contact   = await findOrCreateContact(token, order);
+  const contact    = await findOrCreateContact(token, order);
+
+  console.log(`  State: ${intraState ? 'Intra-state (MH) → GST' : 'Inter-state → IGST'}`);
 
   const lineItems = [];
-
   for (const item of order.line_items) {
-    const sku      = item.sku || '';
+    const sku       = item.sku || '';
     const unitPrice = parseFloat(item.price);
-    const zohoItem  = await findZohoItemBySKU(token, sku);
+    const gstRate   = getGSTRate(sku);
+    const taxId     = await getTaxGroupId(token, gstRate, intraState);
 
-    const hsn      = zohoItem?.hsn_or_sac || '';
-    const gstRate  = determineGSTRate(hsn, unitPrice);
-    const taxId    = await getTaxGroupId(token, gstRate, intraState);
+    console.log(`  ${item.title} | SKU: ${sku} | ₹${unitPrice} | GST: ${gstRate}%`);
 
-    console.log(`  Item: ${item.title} | SKU: ${sku} | HSN: ${hsn} | Price: ₹${unitPrice} | GST: ${gstRate}% | ${intraState ? 'Intra' : 'Inter'}-state`);
-
-    const lineItem = {
-      name:        item.title,
-      description: item.variant_title || '',
-      quantity:    item.quantity,
-      rate:        unitPrice
-    };
-
-    if (zohoItem?.item_id) lineItem.item_id = zohoItem.item_id;
-    if (taxId)             lineItem.tax_id  = taxId;
-
+    const lineItem = { name: item.title, description: item.variant_title || '', quantity: item.quantity, rate: unitPrice };
+    if (taxId) lineItem.tax_id = taxId;
     lineItems.push(lineItem);
   }
 
-  const invoicePayload = {
-    customer_id:        contact.contact_id,
-    date:               new Date().toISOString().split('T')[0],
-    reference_number:   order.name,                    // e.g. #1001
-    line_items:         lineItems,
-    is_inclusive_of_tax: true,                         // MRP inclusive of tax
-    notes:              `Shopify Order ${order.name} | ${intraState ? 'Intra-state (MH)' : 'Inter-state'}`
-  };
-
   const { data } = await axios.post(
-    `${CONFIG.zoho.apiDomain}/books/v3/invoices`,
-    invoicePayload,
+    `${CONFIG.zoho.apiDomain}/books/v3/salesorders`,
+    {
+      customer_id: contact.contact_id,
+      date: new Date().toISOString().split('T')[0],
+      reference_number: order.name,
+      line_items: lineItems,
+      is_inclusive_of_tax: true,
+      notes: `Shopify Order ${order.name} | ${intraState ? 'Intra-state (MH)' : 'Inter-state'}`
+    },
     { headers: zohoHeaders(token), params: { organization_id: CONFIG.zoho.orgId } }
   );
 
-  return data.invoice;
+  return data.salesorder;
 }
 
-// ─── SHOPIFY WEBHOOK VERIFICATION ────────────────────────────────────────────
+// ─── WEBHOOK VERIFICATION ────────────────────────────────────────────────────
 function verifyShopifyWebhook(rawBody, hmacHeader) {
-  const hash = crypto
-    .createHmac('sha256', CONFIG.shopify.secret)
-    .update(rawBody)
-    .digest('base64');
-  try {
-    return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(hmacHeader));
-  } catch {
-    return false;
-  }
+  const hash = crypto.createHmac('sha256', CONFIG.shopify.secret).update(rawBody).digest('base64');
+  try { return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(hmacHeader)); }
+  catch { return false; }
 }
 
-// ─── ROUTES ───────────────────────────────────────────────────────────────────
-// Webhook must receive raw body for HMAC verification
+// ─── ROUTES ──────────────────────────────────────────────────────────────────
 app.post('/webhook/orders/create', express.raw({ type: 'application/json' }), async (req, res) => {
   const hmac = req.headers['x-shopify-hmac-sha256'];
-
   if (!hmac || !verifyShopifyWebhook(req.body, hmac)) {
     console.warn('Rejected webhook — invalid signature');
     return res.status(401).send('Unauthorized');
   }
 
-  // Acknowledge Shopify immediately (must respond within 5 seconds)
   res.status(200).send('OK');
 
   let order;
-  try {
-    order = JSON.parse(req.body);
-  } catch {
-    return console.error('Failed to parse order JSON');
-  }
+  try { order = JSON.parse(req.body); }
+  catch { return console.error('Failed to parse order JSON'); }
 
-  console.log(`\n=== New order received: ${order.name} ===`);
+  console.log(`\n=== New order: ${order.name} ===`);
 
   try {
-    const invoice = await createInvoiceForOrder(order);
-    console.log(`✓ Invoice ${invoice.invoice_number} created for order ${order.name}`);
+    const so = await createSalesOrderForOrder(order);
+    console.log(`✓ Sales Order ${so.salesorder_number} created for ${order.name}`);
   } catch (err) {
-    const detail = err.response?.data || err.message;
-    console.error(`✗ Failed to create invoice for ${order.name}:`, JSON.stringify(detail, null, 2));
+    console.error(`✗ Failed for ${order.name}:`, JSON.stringify(err.response?.data || err.message, null, 2));
   }
 });
 
-// Health check
-app.get('/', (req, res) => {
-  res.json({ status: 'running', service: 'Zoho GST Bridge', store: CONFIG.shopify.store });
-});
+app.get('/', (req, res) => res.json({ status: 'running', service: 'Zoho GST Bridge' }));
 
-// ─── START ────────────────────────────────────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`\nZoho GST Bridge running on port ${PORT}`);
-  console.log(`Store: ${CONFIG.shopify.store}`);
-  console.log(`Webhook endpoint: POST /webhook/orders/create\n`);
+  console.log(`Webhook: POST /webhook/orders/create\n`);
 });
