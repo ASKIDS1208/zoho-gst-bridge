@@ -328,45 +328,53 @@ async function createSalesOrderForOrder(order) {
     lineItems.push(lineItem);
   }
 
-  // Check if sales order already exists for this reference
+  // Wait 10s for Zoho Inventory to create the SO first
+  await new Promise(r => setTimeout(r, 10000));
+
+  // Search for existing SO - try with and without # prefix
   let existingSO = null;
-  try {
-    const searchResp = await axios.get(`${CONFIG.zoho.apiDomain}/books/v3/salesorders`, {
-      headers: zohoHeaders(token),
-      params: { organization_id: CONFIG.zoho.orgId, reference_number: order.name }
-    });
-    if (searchResp.data.salesorders?.length > 0) {
-      existingSO = searchResp.data.salesorders[0];
-      console.log(`Found existing SO: ${existingSO.salesorder_number}, updating tax...`);
-    }
-  } catch(e) { /* no existing SO */ }
+  const refVariants = [order.name, order.name.replace('#', '')];
+  for (const ref of refVariants) {
+    try {
+      const searchResp = await axios.get(`${CONFIG.zoho.apiDomain}/books/v3/salesorders`, {
+        headers: zohoHeaders(token),
+        params: { organization_id: CONFIG.zoho.orgId, reference_number: ref }
+      });
+      if (searchResp.data.salesorders?.length > 0) {
+        existingSO = searchResp.data.salesorders[0];
+        console.log(`Found existing SO: ${existingSO.salesorder_number} (ref: ${ref}), updating tax...`);
+        break;
+      }
+    } catch(e) { /* continue */ }
+  }
 
   const soPayload = {
     customer_id: contact.contact_id,
     date: new Date().toISOString().split('T')[0],
-    reference_number: order.name,
+    reference_number: order.name.replace('#', ''),
     line_items: lineItems,
     notes: `Shopify Order ${order.name} | ${intraState ? 'Intra-state (MH)' : 'Inter-state'}`
   };
 
-  let data;
+  let respData;
   if (existingSO) {
     const resp = await axios.put(
       `${CONFIG.zoho.apiDomain}/books/v3/salesorders/${existingSO.salesorder_id}`,
       soPayload,
       { headers: zohoHeaders(token), params: { organization_id: CONFIG.zoho.orgId } }
     );
-    data = resp.data;
+    respData = resp.data;
   } else {
+    console.log('No existing SO found, creating new one...');
     const resp = await axios.post(
       `${CONFIG.zoho.apiDomain}/books/v3/salesorders`,
       soPayload,
       { headers: zohoHeaders(token), params: { organization_id: CONFIG.zoho.orgId } }
     );
-    data = resp.data;
+    respData = resp.data;
   }
 
-  return data.salesorder;
+  return respData.salesorder;
 }
 
 // ─── WEBHOOK VERIFICATION ────────────────────────────────────────────────────
