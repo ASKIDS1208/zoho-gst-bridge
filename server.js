@@ -253,22 +253,35 @@ function isIntraState(order) {
   return state.includes('maharashtra') || state === 'mh';
 }
 
-// ─── TAX GROUP CACHE ─────────────────────────────────────────────────────────
-let taxGroupCache = null;
+// ─── TAX CACHE ───────────────────────────────────────────────────────────────
+let taxCache = null;
 
 async function getTaxGroupId(token, gstRate, intraState) {
-  if (!taxGroupCache) {
-    const { data } = await axios.get(`${CONFIG.zoho.apiDomain}/books/v3/taxgroups`, {
-      headers: zohoHeaders(token),
-      params:  { organization_id: CONFIG.zoho.orgId }
-    });
-    taxGroupCache = {};
-    (data.tax_groups || []).forEach(tg => { taxGroupCache[tg.tax_group_name] = tg.tax_group_id; });
-    console.log('Tax groups loaded:', Object.keys(taxGroupCache));
+  if (!taxCache) {
+    taxCache = {};
+    // Try taxgroups endpoint first, then taxes endpoint
+    for (const endpoint of ['taxgroups', 'taxes']) {
+      try {
+        const { data } = await axios.get(`${CONFIG.zoho.apiDomain}/books/v3/${endpoint}`, {
+          headers: zohoHeaders(token),
+          params:  { organization_id: CONFIG.zoho.orgId }
+        });
+        const items = data.tax_groups || data.taxes || [];
+        items.forEach(t => {
+          const name = t.tax_group_name || t.tax_name;
+          const id   = t.tax_group_id   || t.tax_id;
+          if (name && id) taxCache[name] = id;
+        });
+        console.log(`Tax cache loaded from ${endpoint}:`, Object.keys(taxCache));
+        if (Object.keys(taxCache).length > 0) break;
+      } catch(e) {
+        console.warn(`${endpoint} endpoint failed:`, e.response?.data?.message || e.message);
+      }
+    }
   }
   const name = intraState ? `GST${gstRate}` : `IGST${gstRate}`;
-  const id   = taxGroupCache[name];
-  if (!id) console.warn(`Tax group "${name}" not found`);
+  const id   = taxCache[name];
+  if (!id) console.warn(`Tax ${name} not found in cache. Available:`, Object.keys(taxCache));
   return id || null;
 }
 
