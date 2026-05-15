@@ -253,9 +253,17 @@ function isIntraState(order) {
   return state.includes('maharashtra') || state === 'mh';
 }
 
-// ─── TAX NAME (no API lookup needed) ─────────────────────────────────────────
-function getTaxName(gstRate, intraState) {
-  return intraState ? `GST${gstRate}` : `IGST${gstRate}`;
+// ─── HARDCODED TAX IDs ───────────────────────────────────────────────────────
+const TAX_IDS = {
+  'GST5':   '2850659000000033241',  // intra-state 5%
+  'GST18':  '2850659000000033257',  // intra-state 18%
+  'IGST5':  '2850659000000033115',  // inter-state 5%
+  'IGST18': '2850659000000033119'   // inter-state 18%
+};
+
+function getTaxId(gstRate, intraState) {
+  const key = intraState ? `GST${gstRate}` : `IGST${gstRate}`;
+  return TAX_IDS[key] || TAX_IDS['GST18'];
 }
 
 // ─── CONTACT HELPER ──────────────────────────────────────────────────────────
@@ -305,16 +313,17 @@ async function createSalesOrderForOrder(order) {
     const sku       = item.sku || '';
     const unitPrice = parseFloat(item.price);
     const gstRate   = getGSTRate(sku);
-    const taxName   = getTaxName(gstRate, intraState);
+    const taxId     = getTaxId(gstRate, intraState);
+    const taxKey    = (intraState ? 'GST' : 'IGST') + gstRate;
 
-    console.log(`  ${item.title} | SKU: ${sku} | ₹${unitPrice} | GST: ${gstRate}% | Tax: ${taxName}`);
+    console.log(`  ${item.title} | SKU: ${sku} | ₹${unitPrice} | GST: ${gstRate}% | Tax: ${taxKey} (${taxId})`);
 
     const lineItem = {
       name: item.title,
       description: item.variant_title || '',
       quantity: item.quantity,
       rate: unitPrice,
-      tax_name: taxName
+      tax_id: taxId
     };
     lineItems.push(lineItem);
   }
