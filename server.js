@@ -7,7 +7,7 @@ const app = express();
 // ─── CONFIG ───────────────────────────────────────────────────────────────────
 const CONFIG = {
   shopify: {
-    secret: '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',
+    secret: '0c1a842a5e89e9ddbab9714ae8bee9b294d124602f810b1274fb4ce8b039a7d9',
     store:  'annasimona.myshopify.com'
   },
   zoho: {
