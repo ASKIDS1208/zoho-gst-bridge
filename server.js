@@ -253,36 +253,9 @@ function isIntraState(order) {
   return state.includes('maharashtra') || state === 'mh';
 }
 
-// ─── TAX CACHE ───────────────────────────────────────────────────────────────
-let taxCache = null;
-
-async function getTaxGroupId(token, gstRate, intraState) {
-  if (!taxCache) {
-    taxCache = {};
-    // Try taxgroups endpoint first, then taxes endpoint
-    for (const endpoint of ['taxgroups', 'taxes']) {
-      try {
-        const { data } = await axios.get(`${CONFIG.zoho.apiDomain}/books/v3/${endpoint}`, {
-          headers: zohoHeaders(token),
-          params:  { organization_id: CONFIG.zoho.orgId }
-        });
-        const items = data.tax_groups || data.taxes || [];
-        items.forEach(t => {
-          const name = t.tax_group_name || t.tax_name;
-          const id   = t.tax_group_id   || t.tax_id;
-          if (name && id) taxCache[name] = id;
-        });
-        console.log(`Tax cache loaded from ${endpoint}:`, Object.keys(taxCache));
-        if (Object.keys(taxCache).length > 0) break;
-      } catch(e) {
-        console.warn(`${endpoint} endpoint failed:`, e.response?.data?.message || e.message);
-      }
-    }
-  }
-  const name = intraState ? `GST${gstRate}` : `IGST${gstRate}`;
-  const id   = taxCache[name];
-  if (!id) console.warn(`Tax ${name} not found in cache. Available:`, Object.keys(taxCache));
-  return id || null;
+// ─── TAX NAME (no API lookup needed) ─────────────────────────────────────────
+function getTaxName(gstRate, intraState) {
+  return intraState ? `GST${gstRate}` : `IGST${gstRate}`;
 }
 
 // ─── CONTACT HELPER ──────────────────────────────────────────────────────────
@@ -332,12 +305,17 @@ async function createSalesOrderForOrder(order) {
     const sku       = item.sku || '';
     const unitPrice = parseFloat(item.price);
     const gstRate   = getGSTRate(sku);
-    const taxId     = await getTaxGroupId(token, gstRate, intraState);
+    const taxName   = getTaxName(gstRate, intraState);
 
-    console.log(`  ${item.title} | SKU: ${sku} | ₹${unitPrice} | GST: ${gstRate}%`);
+    console.log(`  ${item.title} | SKU: ${sku} | ₹${unitPrice} | GST: ${gstRate}% | Tax: ${taxName}`);
 
-    const lineItem = { name: item.title, description: item.variant_title || '', quantity: item.quantity, rate: unitPrice };
-    if (taxId) lineItem.tax_id = taxId;
+    const lineItem = {
+      name: item.title,
+      description: item.variant_title || '',
+      quantity: item.quantity,
+      rate: unitPrice,
+      tax_name: taxName
+    };
     lineItems.push(lineItem);
   }
 
