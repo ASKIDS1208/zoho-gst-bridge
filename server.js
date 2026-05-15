@@ -228,10 +228,22 @@ function zohoHeaders(token) {
   return { Authorization: `Zoho-oauthtoken ${token}`, 'Content-Type': 'application/json' };
 }
 
+// ─── BUILD NUMBER-BASED LOOKUP ───────────────────────────────────────────────
+// Handles Shopify SKUs like ASK/SailBoat/NAP/250192 vs master ASK/NAP/250192
+const NUMBER_TAX_MAP = {};
+Object.entries(SKU_TAX_MAP).forEach(([sku, rate]) => {
+  const match = sku.match(/(\d{5,6})$/);
+  if (match && !NUMBER_TAX_MAP[match[1]]) NUMBER_TAX_MAP[match[1]] = rate;
+});
+
 // ─── TAX LOGIC ───────────────────────────────────────────────────────────────
 function getGSTRate(sku) {
-  const rate = SKU_TAX_MAP[sku];
-  if (rate !== undefined) return rate;
+  if (SKU_TAX_MAP[sku] !== undefined) return SKU_TAX_MAP[sku];
+  const match = sku.match(/(\d{5,6})$/);
+  if (match && NUMBER_TAX_MAP[match[1]] !== undefined) {
+    console.log(`SKU "${sku}" matched by number ${match[1]} -> ${NUMBER_TAX_MAP[match[1]]}%`);
+    return NUMBER_TAX_MAP[match[1]];
+  }
   console.warn(`SKU "${sku}" not in tax map, defaulting to 18%`);
   return 18;
 }
@@ -316,18 +328,43 @@ async function createSalesOrderForOrder(order) {
     lineItems.push(lineItem);
   }
 
-  const { data } = await axios.post(
-    `${CONFIG.zoho.apiDomain}/books/v3/salesorders`,
-    {
-      customer_id: contact.contact_id,
-      date: new Date().toISOString().split('T')[0],
-      reference_number: order.name,
-      line_items: lineItems,
-      is_inclusive_of_tax: true,
-      notes: `Shopify Order ${order.name} | ${intraState ? 'Intra-state (MH)' : 'Inter-state'}`
-    },
-    { headers: zohoHeaders(token), params: { organization_id: CONFIG.zoho.orgId } }
-  );
+  // Check if sales order already exists for this reference
+  let existingSO = null;
+  try {
+    const searchResp = await axios.get(`${CONFIG.zoho.apiDomain}/books/v3/salesorders`, {
+      headers: zohoHeaders(token),
+      params: { organization_id: CONFIG.zoho.orgId, reference_number: order.name }
+    });
+    if (searchResp.data.salesorders?.length > 0) {
+      existingSO = searchResp.data.salesorders[0];
+      console.log(`Found existing SO: ${existingSO.salesorder_number}, updating tax...`);
+    }
+  } catch(e) { /* no existing SO */ }
+
+  const soPayload = {
+    customer_id: contact.contact_id,
+    date: new Date().toISOString().split('T')[0],
+    reference_number: order.name,
+    line_items: lineItems,
+    notes: `Shopify Order ${order.name} | ${intraState ? 'Intra-state (MH)' : 'Inter-state'}`
+  };
+
+  let data;
+  if (existingSO) {
+    const resp = await axios.put(
+      `${CONFIG.zoho.apiDomain}/books/v3/salesorders/${existingSO.salesorder_id}`,
+      soPayload,
+      { headers: zohoHeaders(token), params: { organization_id: CONFIG.zoho.orgId } }
+    );
+    data = resp.data;
+  } else {
+    const resp = await axios.post(
+      `${CONFIG.zoho.apiDomain}/books/v3/salesorders`,
+      soPayload,
+      { headers: zohoHeaders(token), params: { organization_id: CONFIG.zoho.orgId } }
+    );
+    data = resp.data;
+  }
 
   return data.salesorder;
 }
@@ -365,8 +402,8 @@ app.post('/webhook/orders/create', express.raw({ type: 'application/json' }), as
 
 app.get('/', (req, res) => res.json({ status: 'running', service: 'Zoho GST Bridge' }));
 
-const PORT = process.env.PORT || 10000;
-app.listen(PORT, '0.0.0.0', () => {
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
   console.log(`\nZoho GST Bridge running on port ${PORT}`);
   console.log(`Webhook: POST /webhook/orders/create\n`);
 });
