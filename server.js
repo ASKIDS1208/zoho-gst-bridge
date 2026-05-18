@@ -8,7 +8,6 @@ const app = express();
 const CONFIG = {
   shopify: {
     secret: '0c1a842a5e89e9ddbab9714ae8bee9b294d124602f810b1274fb4ce8b039a7d9',
-    store:  'annasimona.myshopify.com'
   },
   zoho: {
     clientId:     '1000.0K493ZO5GJSK6JB9GABD3G665BNO5F',
@@ -18,6 +17,16 @@ const CONFIG = {
     apiDomain:    'https://www.zohoapis.in'
   }
 };
+
+// ─── DEDUP: ignore Shopify webhook retries ────────────────────────────────────
+const processed = new Map();
+function isDuplicate(orderId) {
+  const now = Date.now();
+  if (processed.has(orderId) && now - processed.get(orderId) < 120000) return true;
+  processed.set(orderId, now);
+  for (const [id, ts] of processed) if (now - ts > 600000) processed.delete(id);
+  return false;
+}
 
 // ─── SKU → GST RATE MAP ───────────────────────────────────────────────────────
 const SKU_TAX_MAP = {
@@ -200,218 +209,174 @@ const SKU_TAX_MAP = {
   "ASK/WC/250013": 5, "ASK/WC/250031": 5, "ASK/WC/250049": 5,
   "ASK/WC/250067": 5, "ASK/WC/250121": 5, "ASK/WC/250139": 5,
   "ASK/WC/250157": 5, "ASK/WC/250175": 5, "ASK/WC/250194": 5,
-  "ASK/WC/250214": 5, "ASK/WC/250232": 5, "ASK/WC/250251": 5
+  "ASK/WC/250214": 5, "ASK/WC/250232": 5, "ASK/WC/250251": 5,
+  "ASK/ChangingPad/CP/250099": 5
 };
 
-// ─── ZOHO TOKEN MANAGEMENT ───────────────────────────────────────────────────
-let zohoAccessToken = null;
-let tokenExpiry = 0;
-
-async function getZohoToken() {
-  if (zohoAccessToken && Date.now() < tokenExpiry) return zohoAccessToken;
-  const { data } = await axios.post('https://accounts.zoho.in/oauth/v2/token', null, {
-    params: {
-      refresh_token: CONFIG.zoho.refreshToken,
-      client_id:     CONFIG.zoho.clientId,
-      client_secret: CONFIG.zoho.clientSecret,
-      grant_type:    'refresh_token'
-    }
-  });
-  if (!data.access_token) throw new Error('Failed to get Zoho token: ' + JSON.stringify(data));
-  zohoAccessToken = data.access_token;
-  tokenExpiry = Date.now() + (data.expires_in * 1000) - 60000;
-  console.log('Zoho token refreshed successfully');
-  return zohoAccessToken;
-}
-
-function zohoHeaders(token) {
-  return { Authorization: `Zoho-oauthtoken ${token}`, 'Content-Type': 'application/json' };
-}
-
-// ─── BUILD NUMBER-BASED LOOKUP ───────────────────────────────────────────────
-// Handles Shopify SKUs like ASK/SailBoat/NAP/250192 vs master ASK/NAP/250192
 const NUMBER_TAX_MAP = {};
 Object.entries(SKU_TAX_MAP).forEach(([sku, rate]) => {
-  const match = sku.match(/(\d{5,6})$/);
-  if (match && !NUMBER_TAX_MAP[match[1]]) NUMBER_TAX_MAP[match[1]] = rate;
+  const m = sku.match(/(\d{5,6})$/);
+  if (m && !NUMBER_TAX_MAP[m[1]]) NUMBER_TAX_MAP[m[1]] = rate;
 });
 
-// ─── TAX LOGIC ───────────────────────────────────────────────────────────────
 function getGSTRate(sku) {
   if (SKU_TAX_MAP[sku] !== undefined) return SKU_TAX_MAP[sku];
-  const match = sku.match(/(\d{5,6})$/);
-  if (match && NUMBER_TAX_MAP[match[1]] !== undefined) {
-    console.log(`SKU "${sku}" matched by number ${match[1]} -> ${NUMBER_TAX_MAP[match[1]]}%`);
-    return NUMBER_TAX_MAP[match[1]];
+  const m = sku.match(/(\d{5,6})$/);
+  if (m && NUMBER_TAX_MAP[m[1]] !== undefined) {
+    console.log(`  SKU "${sku}" matched by number ${m[1]} → ${NUMBER_TAX_MAP[m[1]]}%`);
+    return NUMBER_TAX_MAP[m[1]];
   }
-  console.warn(`SKU "${sku}" not in tax map, defaulting to 18%`);
+  console.warn(`  SKU "${sku}" not found, defaulting to 18%`);
   return 18;
 }
 
 function isIntraState(order) {
-  const state = (order.shipping_address?.province || order.billing_address?.province || '').toLowerCase();
-  return state.includes('maharashtra') || state === 'mh';
+  const raw = (
+    order.shipping_address?.province ||
+    order.shipping_address?.province_code ||
+    order.billing_address?.province ||
+    order.billing_address?.province_code || ''
+  ).toLowerCase().trim();
+  return raw.includes('maharashtra') || raw === 'mh';
 }
 
-// ─── HARDCODED TAX IDs ───────────────────────────────────────────────────────
 const TAX_IDS = {
-  'GST5':   '2850659000000033241',  // intra-state 5%
-  'GST18':  '2850659000000033257',  // intra-state 18%
-  'IGST5':  '2850659000000033115',  // inter-state 5%
-  'IGST18': '2850659000000033119'   // inter-state 18%
+  GST5: '2850659000000033241', GST18: '2850659000000033257',
+  IGST5: '2850659000000033115', IGST18: '2850659000000033119'
 };
+const getTaxId = (rate, intra) => TAX_IDS[(intra ? 'GST' : 'IGST') + rate] || TAX_IDS.GST18;
 
-function getTaxId(gstRate, intraState) {
-  const key = intraState ? `GST${gstRate}` : `IGST${gstRate}`;
-  return TAX_IDS[key] || TAX_IDS['GST18'];
+// ─── ZOHO TOKEN ───────────────────────────────────────────────────────────────
+let zohoToken = null, tokenExpiry = 0;
+async function getZohoToken() {
+  if (zohoToken && Date.now() < tokenExpiry) return zohoToken;
+  const { data } = await axios.post('https://accounts.zoho.in/oauth/v2/token', null, {
+    params: { refresh_token: CONFIG.zoho.refreshToken, client_id: CONFIG.zoho.clientId, client_secret: CONFIG.zoho.clientSecret, grant_type: 'refresh_token' }
+  });
+  if (!data.access_token) throw new Error('Token failed: ' + JSON.stringify(data));
+  zohoToken = data.access_token;
+  tokenExpiry = Date.now() + data.expires_in * 1000 - 60000;
+  console.log('  Zoho token refreshed');
+  return zohoToken;
+}
+const zh = t => ({ Authorization: `Zoho-oauthtoken ${t}`, 'Content-Type': 'application/json' });
+const zp = { organization_id: CONFIG.zoho.orgId };
+
+// ─── FIND SO ──────────────────────────────────────────────────────────────────
+async function findSO(token, orderName) {
+  const num = orderName.replace('#', '').trim();
+  for (const ref of [num, orderName, `#${num}`]) {
+    try {
+      const { data } = await axios.get(`${CONFIG.zoho.apiDomain}/books/v3/salesorders`, {
+        headers: zh(token), params: { ...zp, reference_number: ref }
+      });
+      if (data.salesorders?.length > 0) {
+        console.log(`  Found SO ${data.salesorders[0].salesorder_number} (ref: "${ref}")`);
+        return data.salesorders[0];
+      }
+    } catch (e) { /* try next */ }
+  }
+  return null;
 }
 
-// ─── CONTACT HELPER ──────────────────────────────────────────────────────────
+// ─── FIND OR CREATE CONTACT ───────────────────────────────────────────────────
 async function findOrCreateContact(token, order) {
   const email = order.email || '';
   const addr  = order.billing_address || order.shipping_address || {};
   const name  = `${addr.first_name || ''} ${addr.last_name || ''}`.trim() || 'Guest Customer';
-
   if (email) {
     try {
       const { data } = await axios.get(`${CONFIG.zoho.apiDomain}/books/v3/contacts`, {
-        headers: zohoHeaders(token),
-        params:  { organization_id: CONFIG.zoho.orgId, email }
+        headers: zh(token), params: { ...zp, email }
       });
       if (data.contacts?.length > 0) return data.contacts[0];
-    } catch (e) { /* continue */ }
+    } catch (e) { /* create new */ }
   }
-
-  const { data: created } = await axios.post(
-    `${CONFIG.zoho.apiDomain}/books/v3/contacts`,
-    {
-      contact_name: name, contact_type: 'customer', email,
-      phone: addr.phone || order.phone || '',
-      gst_treatment: 'consumer',
-      billing_address: {
-        address: addr.address1 || '', city: addr.city || '',
-        state: addr.province || '', zip: addr.zip || '',
-        country: addr.country || 'India'
-      }
-    },
-    { headers: zohoHeaders(token), params: { organization_id: CONFIG.zoho.orgId } }
-  );
-  console.log(`Created contact: ${name}`);
-  return created.contact;
+  const { data } = await axios.post(`${CONFIG.zoho.apiDomain}/books/v3/contacts`, {
+    contact_name: name, contact_type: 'customer', email,
+    phone: addr.phone || order.phone || '', gst_treatment: 'consumer',
+    billing_address: { address: addr.address1 || '', city: addr.city || '', state: addr.province || '', zip: addr.zip || '', country: 'India' }
+  }, { headers: zh(token), params: zp });
+  console.log(`  Created contact: ${name}`);
+  return data.contact;
 }
 
-// ─── CREATE SALES ORDER ───────────────────────────────────────────────────────
-async function createSalesOrderForOrder(order) {
-  const token      = await getZohoToken();
-  const intraState = isIntraState(order);
-  const contact    = await findOrCreateContact(token, order);
+// ─── PROCESS ORDER ────────────────────────────────────────────────────────────
+async function processOrder(order) {
+  const token = await getZohoToken();
+  const intra = isIntraState(order);
+  console.log(`  ${intra ? 'Intra-state (MH) → CGST+SGST' : 'Inter-state → IGST'}`);
 
-  console.log(`  State: ${intraState ? 'Intra-state (MH) → GST' : 'Inter-state → IGST'}`);
+  const lineItems = order.line_items.map(item => {
+    const rate  = getGSTRate(item.sku || '');
+    const taxId = getTaxId(rate, intra);
+    console.log(`  ${item.title} | ${item.sku} | ₹${item.price} | ${intra ? 'GST' : 'IGST'}${rate}`);
+    return { name: item.title, description: item.variant_title || '', quantity: item.quantity, rate: parseFloat(item.price), tax_id: taxId };
+  });
 
-  const lineItems = [];
-  for (const item of order.line_items) {
-    const sku       = item.sku || '';
-    const unitPrice = parseFloat(item.price);
-    const gstRate   = getGSTRate(sku);
-    const taxId     = getTaxId(gstRate, intraState);
-    const taxKey    = (intraState ? 'GST' : 'IGST') + gstRate;
+  // Wait for Zoho's native sync to create the SO
+  console.log('  Waiting 20s for Zoho native sync...');
+  await new Promise(r => setTimeout(r, 20000));
 
-    console.log(`  ${item.title} | SKU: ${sku} | ₹${unitPrice} | GST: ${gstRate}% | Tax: ${taxKey} (${taxId})`);
+  const freshToken = await getZohoToken();
+  const contact    = await findOrCreateContact(freshToken, order);
+  const so         = await findSO(freshToken, order.name);
 
-    const lineItem = {
-      name: item.title,
-      description: item.variant_title || '',
-      quantity: item.quantity,
-      rate: unitPrice,
-      tax_id: taxId
-    };
-    lineItems.push(lineItem);
-  }
+  // Check if we already made an invoice for this order
+  const refNum = order.name.replace('#', '');
+  try {
+    const { data: existing } = await axios.get(`${CONFIG.zoho.apiDomain}/books/v3/invoices`, {
+      headers: zh(freshToken), params: { ...zp, reference_number: refNum }
+    });
+    if (existing.invoices?.length > 0) {
+      console.log(`  Invoice ${existing.invoices[0].invoice_number} already exists — skipping`);
+      return;
+    }
+  } catch (e) { /* proceed */ }
 
-  // Wait 10s for Zoho Inventory to create the SO first
-  await new Promise(r => setTimeout(r, 10000));
-
-  // Search for existing SO - try with and without # prefix
-  let existingSO = null;
-  const refVariants = [order.name, order.name.replace('#', '')];
-  for (const ref of refVariants) {
-    try {
-      const searchResp = await axios.get(`${CONFIG.zoho.apiDomain}/books/v3/salesorders`, {
-        headers: zohoHeaders(token),
-        params: { organization_id: CONFIG.zoho.orgId, reference_number: ref }
-      });
-      if (searchResp.data.salesorders?.length > 0) {
-        existingSO = searchResp.data.salesorders[0];
-        console.log(`Found existing SO: ${existingSO.salesorder_number} (ref: ${ref}), updating tax...`);
-        break;
-      }
-    } catch(e) { /* continue */ }
-  }
-
-  const soPayload = {
-    customer_id: contact.contact_id,
-    date: new Date().toISOString().split('T')[0],
-    reference_number: order.name.replace('#', ''),
-    line_items: lineItems,
-    notes: `Shopify Order ${order.name} | ${intraState ? 'Intra-state (MH)' : 'Inter-state'}`
+  // Create GST-correct invoice (linked to SO if found)
+  const payload = {
+    customer_id:      contact.contact_id,
+    date:             new Date().toISOString().split('T')[0],
+    reference_number: refNum,
+    line_items:       lineItems,
+    notes:            `Shopify Order ${order.name} | ${intra ? 'Intra-state (MH)' : 'Inter-state'}`,
+    ...(so ? { salesorder_id: so.salesorder_id } : {})
   };
 
-  let respData;
-  if (existingSO) {
-    const resp = await axios.put(
-      `${CONFIG.zoho.apiDomain}/books/v3/salesorders/${existingSO.salesorder_id}`,
-      soPayload,
-      { headers: zohoHeaders(token), params: { organization_id: CONFIG.zoho.orgId } }
-    );
-    respData = resp.data;
-  } else {
-    console.log('No existing SO found, creating new one...');
-    const resp = await axios.post(
-      `${CONFIG.zoho.apiDomain}/books/v3/salesorders`,
-      soPayload,
-      { headers: zohoHeaders(token), params: { organization_id: CONFIG.zoho.orgId } }
-    );
-    respData = resp.data;
-  }
+  const { data } = await axios.post(`${CONFIG.zoho.apiDomain}/books/v3/invoices`, payload, {
+    headers: zh(freshToken), params: zp
+  });
 
-  return respData.salesorder;
+  console.log(`  ✓ Invoice ${data.invoice?.invoice_number} created${so ? ` (linked to ${so.salesorder_number})` : ''}`);
 }
 
-// ─── WEBHOOK VERIFICATION ────────────────────────────────────────────────────
-function verifyShopifyWebhook(rawBody, hmacHeader) {
-  const hash = crypto.createHmac('sha256', CONFIG.shopify.secret).update(rawBody).digest('base64');
-  try { return crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(hmacHeader)); }
-  catch { return false; }
-}
-
-// ─── ROUTES ──────────────────────────────────────────────────────────────────
+// ─── WEBHOOK ──────────────────────────────────────────────────────────────────
 app.post('/webhook/orders/create', express.raw({ type: 'application/json' }), async (req, res) => {
   const hmac = req.headers['x-shopify-hmac-sha256'];
-  if (!hmac || !verifyShopifyWebhook(req.body, hmac)) {
-    console.warn('Rejected webhook — invalid signature');
-    return res.status(401).send('Unauthorized');
-  }
+  try {
+    const hash = crypto.createHmac('sha256', CONFIG.shopify.secret).update(req.body).digest('base64');
+    if (!crypto.timingSafeEqual(Buffer.from(hash), Buffer.from(hmac || ''))) {
+      console.warn('Invalid signature'); return res.status(401).send('Unauthorized');
+    }
+  } catch { return res.status(401).send('Unauthorized'); }
 
-  res.status(200).send('OK');
+  res.status(200).send('OK'); // fast reply so Shopify doesn't retry
 
   let order;
-  try { order = JSON.parse(req.body); }
-  catch { return console.error('Failed to parse order JSON'); }
+  try { order = JSON.parse(req.body); } catch { return console.error('Bad JSON'); }
 
-  console.log(`\n=== New order: ${order.name} ===`);
+  if (isDuplicate(order.id)) { console.log(`⚡ Duplicate ignored: ${order.name}`); return; }
 
+  console.log(`\n=== Order ${order.name} ===`);
   try {
-    const so = await createSalesOrderForOrder(order);
-    console.log(`✓ Sales Order ${so.salesorder_number} created for ${order.name}`);
+    await processOrder(order);
   } catch (err) {
-    console.error(`✗ Failed for ${order.name}:`, JSON.stringify(err.response?.data || err.message, null, 2));
+    console.error(`✗ ${order.name}:`, JSON.stringify(err.response?.data || err.message, null, 2));
   }
 });
 
-app.get('/', (req, res) => res.json({ status: 'running', service: 'Zoho GST Bridge' }));
+app.get('/', (req, res) => res.json({ status: 'ok', version: '3.0' }));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`\nZoho GST Bridge running on port ${PORT}`);
-  console.log(`Webhook: POST /webhook/orders/create\n`);
-});
+app.listen(PORT, () => console.log(`\nZoho GST Bridge v3.0 on port ${PORT}\n`));
