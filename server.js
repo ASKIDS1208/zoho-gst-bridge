@@ -344,9 +344,31 @@ async function processOrder(order) {
     ...(so ? { salesorder_id: so.salesorder_id } : {})
   };
 
-  const { data } = await axios.post(`${CONFIG.zoho.apiDomain}/books/v3/invoices`, payload, {
-    headers: zh(freshToken), params: zp
-  });
+  let data;
+  try {
+    const resp = await axios.post(`${CONFIG.zoho.apiDomain}/books/v3/invoices`, payload, {
+      headers: zh(freshToken), params: zp
+    });
+    data = resp.data;
+  } catch (err) {
+    // Zoho error 3032: IGST used but it's actually intra-state — retry with GST
+    if (err.response?.data?.code === 3032) {
+      console.log('  Zoho says intra-state — retrying with CGST+SGST...');
+      const fixedItems = order.line_items.map(item => {
+        const rate  = getGSTRate(item.sku || '');
+        const taxId = getTaxId(rate, true); // force intra-state
+        return { name: item.title, description: item.variant_title || '', quantity: item.quantity, rate: parseFloat(item.price), tax_id: taxId };
+      });
+      payload.line_items = fixedItems;
+      payload.notes = `Shopify Order ${order.name} | Intra-state (MH) [auto-corrected]`;
+      const resp2 = await axios.post(`${CONFIG.zoho.apiDomain}/books/v3/invoices`, payload, {
+        headers: zh(freshToken), params: zp
+      });
+      data = resp2.data;
+    } else {
+      throw err;
+    }
+  }
 
   console.log(`  ✓ Invoice ${data.invoice?.invoice_number} created${so ? ` (linked to ${so.salesorder_number})` : ''}`);
 }
